@@ -1,32 +1,33 @@
-
 import React from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Shield, Mail, Globe, Cpu } from 'lucide-react';
+import { Shield, Cpu } from 'lucide-react';
+import { Lang } from '../src/translations';
 
-declare global {
-  interface Window {
-    Paddle: {
-      Initialize: (options: { token: string }) => void;
-      Checkout: {
-        open: (options: { items: { priceId: string; quantity: number }[] }) => void;
-      };
-    };
-  }
-}
+type TranslationKey = keyof typeof import('../src/translations').zh;
 
 interface LayoutProps {
   children: React.ReactNode;
+  lang: Lang;
+  setLang: (lang: Lang) => void;
+  t: (key: TranslationKey) => string;
 }
 
-const Layout: React.FC<LayoutProps> = ({ children }) => {
+function LanguageSwitcher({ lang, setLang }: { lang: Lang; setLang: (lang: Lang) => void }) {
+  return (
+    <select
+      value={lang}
+      onChange={(e) => setLang(e.target.value as Lang)}
+      className="border-2 border-indigo-500 bg-indigo-500 text-white rounded-lg px-3 py-1.5 text-sm font-medium cursor-pointer hover:bg-indigo-600 transition-colors"
+    >
+      <option value="zh">中文</option>
+      <option value="en">English</option>
+    </select>
+  );
+}
+
+const Layout: React.FC<LayoutProps> = ({ children, lang, setLang, t }) => {
   const location = useLocation();
   const navigate = useNavigate();
-
-  const handlePaymentClick = () => {
-    window.Paddle.Checkout.open({
-      items: [{ priceId: 'pri_01kgrhp2wrthebpgwmn8eh5ssy', quantity: 1 }]
-    });
-  };
 
   const handleNavClick = (id: string) => {
     if (location.pathname !== '/') {
@@ -47,7 +48,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
   return (
     <div className="min-h-screen flex flex-col">
-      {/* Navbar */}
       <nav className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-slate-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between h-16 items-center">
@@ -59,28 +59,21 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                 </span>
               </Link>
             </div>
-            <div className="hidden md:flex items-center space-x-8">
-              <button onClick={() => handleNavClick('how-it-works')} className="text-slate-600 hover:text-indigo-600 transition-colors font-medium cursor-pointer">How it works</button>
-              <button onClick={() => handleNavClick('demo')} className="text-slate-600 hover:text-indigo-600 transition-colors font-medium cursor-pointer">AI Demo</button>
-              <button onClick={() => handleNavClick('pricing')} className="text-slate-600 hover:text-indigo-600 transition-colors font-medium cursor-pointer">Pricing</button>
-              <button onClick={() => handleNavClick('contact')} className="text-slate-600 hover:text-indigo-600 transition-colors font-medium cursor-pointer">Contact</button>
-              <button 
-                onClick={handlePaymentClick}
-                className="bg-indigo-600 text-white px-5 py-2 rounded-full font-semibold hover:bg-indigo-700 transition-all shadow-md hover:shadow-lg"
-              >
-                Get My Lease Reviewed
-              </button>
+            <div className="flex items-center space-x-4 md:space-x-8">
+              <div className="hidden md:flex items-center space-x-8">
+                <button onClick={() => handleNavClick('pricing')} className="text-slate-600 hover:text-indigo-600 transition-colors font-medium cursor-pointer">Pricing</button>
+                <button onClick={() => handleNavClick('contact')} className="text-slate-600 hover:text-indigo-600 transition-colors font-medium cursor-pointer">Contact</button>
+              </div>
+              <LanguageSwitcher lang={lang} setLang={setLang} />
             </div>
           </div>
         </div>
       </nav>
 
-      {/* Main Content */}
       <main className="flex-grow">
         {children}
       </main>
 
-      {/* Footer */}
       <footer className="bg-white border-t border-slate-200 pt-16 pb-8">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-12">
@@ -100,8 +93,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             <div>
               <h4 className="font-semibold text-slate-900 mb-4">Quick Links</h4>
               <ul className="space-y-2">
-                <li><button onClick={() => handleNavClick('how-it-works')} className="text-slate-600 hover:text-indigo-600 text-sm cursor-pointer block text-left w-full">How it works</button></li>
-                <li><button onClick={() => handleNavClick('demo')} className="text-slate-600 hover:text-indigo-600 text-sm cursor-pointer block text-left w-full">AI Demo</button></li>
                 <li><button onClick={() => handleNavClick('pricing')} className="text-slate-600 hover:text-indigo-600 text-sm cursor-pointer block text-left w-full">Pricing</button></li>
                 <li><button onClick={() => handleNavClick('contact')} className="text-slate-600 hover:text-indigo-600 text-sm cursor-pointer block text-left w-full">Contact</button></li>
               </ul>

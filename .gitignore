@@ -25,3 +25,9 @@ dist-ssr
 
 /venv/
 /backend/
+# Environment files with secrets
+.env
+.env.local
+.env.production
+.env.development
+.vercel

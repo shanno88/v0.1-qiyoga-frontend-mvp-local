@@ -3,37 +3,43 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   ArrowRight,
   CheckCircle2,
-  Search,
   AlertCircle,
   UploadCloud,
   Mail,
   Clock,
   Loader2,
-  AlertTriangle,
   ChevronDown,
   ChevronUp,
-  Sparkles,
   X,
-  User
+  User,
+  Printer
 } from 'lucide-react';
-import { GoogleGenAI, Type } from "@google/genai";
+import { apiPost, API_ENDPOINTS } from '../src/config/api';
+import { PRICE_ID } from '../src/config/paddle';
+import { zh, Lang } from '../src/translations';
+import '../src/print.css';
+import { callApiWithTiming, logTiming, TimingResult } from '../src/utils/timing';
+
+type TranslationKey = keyof typeof zh;
+
+type HomeProps = {
+  t: (key: TranslationKey) => string;
+  lang: Lang;
+};
 
 declare global {
   interface Window {
     Paddle: {
       Initialize: (options: { token: string }) => void;
       Checkout: {
-        open: (options: { items: { priceId: string; quantity: number }[] }) => void;
+        open: (options: { items: { price_id: string; quantity: number }[] }) => void;
       };
     };
   }
 }
 
-const Home: React.FC = () => {
-  const [file, setFile] = useState<File | null>(null);
-  const [demoClause, setDemoClause] = useState("");
-  const [demoResult, setDemoResult] = useState<{explanation: string, risk: string} | null>(null);
-  const [isDemoAnalyzing, setIsDemoAnalyzing] = useState(false);
+const Home: React.FC<HomeProps> = ({ t, lang }) => {
+  const [files, setFiles] = useState<File[]>([]);
   const [isWaitlistOpen, setIsWaitlistOpen] = useState(false);
   const [waitlistSuccess, setWaitlistSuccess] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -42,24 +48,45 @@ const Home: React.FC = () => {
   const [analysisId, setAnalysisId] = useState<string | null>(null);
   const [userId, setUserId] = useState<string>("");
   const [hasFullAccess, setHasFullAccess] = useState(false);
+  const [isFullLoading, setIsFullLoading] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [paymentEmail, setPaymentEmail] = useState<string>("");
-  const [quickClauseText, setQuickClauseText] = useState("");
-  const [quickAnalyzing, setQuickAnalyzing] = useState(false);
-  const [quickResult, setQuickResult] = useState<any>(null);
-  const [quickError, setQuickError] = useState("");
   const [openFaq, setOpenFaq] = useState<number | null>(null);
   const [pricingError, setPricingError] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const analysisRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let storedUserId = localStorage.getItem("user_id");
-    if (!storedUserId) {
+    
+    // In development mode, allow test user for bypass
+    const isDev = import.meta.env.DEV;
+    const useTestUser = isDev && import.meta.env.VITE_TEST_USER_BYPASS === "true";
+    
+    if (useTestUser) {
+      storedUserId = "test_user";
+      localStorage.setItem("user_id", storedUserId);
+    } else if (!storedUserId) {
       storedUserId = crypto.randomUUID();
       localStorage.setItem("user_id", storedUserId);
     }
+    
     setUserId(storedUserId);
   }, []);
+
+  useEffect(() => {
+    if (analysisResult?.success && analysisResult.data) {
+      setTimeout(() => {
+        analysisRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start'
+        });
+        if (analysisResult.data.risk_score) {
+          document.title = `租约分析完成 - ${analysisResult.data.risk_score}分 | QiYoga`;
+        }
+      }, 500);
+    }
+  }, [analysisResult]);
 
   const scrollToSection = (id: string) => {
     const element = document.getElementById(id);
@@ -70,46 +97,6 @@ const Home: React.FC = () => {
 
   const toggleFaq = (index: number) => {
     setOpenFaq(openFaq === index ? null : index);
-  };
-
-  const handleQuickAnalyze = async () => {
-    if (!quickClauseText.trim()) {
-      setQuickError("Please enter a clause to analyze");
-      return;
-    }
-
-    if (quickClauseText.length > 300) {
-      setQuickError("Text too long. Maximum 300 characters.");
-      return;
-    }
-
-    setQuickAnalyzing(true);
-    setQuickError("");
-    setQuickResult(null);
-
-    try {
-      const response = await fetch("http://127.0.0.1:8000/api/lease/clause/quick-analyze", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          clause_text: quickClauseText
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      setQuickResult(data.data);
-    } catch (error) {
-      console.error("Quick analysis error:", error);
-      setQuickError("Failed to analyze clause. Please try again.");
-    } finally {
-      setQuickAnalyzing(false);
-    }
   };
 
   const handleWaitlistSubmit = (e: React.FormEvent) => {
@@ -124,8 +111,8 @@ const Home: React.FC = () => {
   };
 
   const handleAnalyze = async () => {
-    if (!file) {
-      setAnalysisError("Please select a file first");
+    if (!files || files.length === 0) {
+      setAnalysisError("Please select at least one file");
       return;
     }
 
@@ -140,27 +127,43 @@ const Home: React.FC = () => {
 
     try {
       const formData = new FormData();
-      formData.append("file", file);
-
-      const response = await fetch(`http://127.0.0.1:8000/api/lease/analyze?user_id=${userId}`, {
-        method: "POST",
-        body: formData,
+      files.forEach((file) => {
+        formData.append("files", file);
       });
+      formData.append("language", lang);
+      console.log('[DEBUG] Sending OCR request with language:', lang, 'files:', files.length);
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      const { data: result, timing } = await callApiWithTiming<any>(
+        'LeaseAnalyze',
+        `${API_ENDPOINTS.leaseAnalyze}?user_id=${userId}&language=${lang}`,
+        { method: "POST", body: formData }
+      );
+      logTiming('LeaseAnalyze', timing);
+
+      if (result.detail === "ACCESS_DENIED") {
+        setAnalysisError(result.message || "您当前没有有效的分析权限，请登录或完成支付后再试。");
+        return;
       }
 
-      const result = await response.json();
+      if (!result.success && result.detail) {
+        setAnalysisError(result.message || "Access denied. Please try again.");
+        return;
+      }
+
       setAnalysisResult(result);
 
       if (result.success && result.data?.analysis_id) {
         setAnalysisId(result.data.analysis_id);
-        setHasFullAccess(result.data.has_full_access);
+        setHasFullAccess(true);
       }
     } catch (error) {
       console.error("Analysis error:", error);
-      setAnalysisError(error instanceof Error ? error.message : "Failed to analyze lease");
+      const errorMessage = error instanceof Error ? error.message : 'Failed to analyze lease';
+      if (errorMessage.includes('Failed to fetch') || errorMessage.includes('ERR_BLOCKED_BY_CLIENT')) {
+        setAnalysisError("服务器暂时不可用，请稍后再试。如果多次失败，请联系支持。");
+      } else {
+        setAnalysisError(errorMessage);
+      }
     } finally {
       setIsAnalyzing(false);
     }
@@ -181,16 +184,14 @@ const Home: React.FC = () => {
     }
 
     try {
-      const response = await fetch("http://localhost:3001/api/checkout", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ 
-          email: paymentEmail,
-          user_id: userId 
-        }),
+      const response = await apiPost(API_ENDPOINTS.checkout, {
+        email: paymentEmail,
+        user_id: userId
       });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
 
       const result = await response.json();
 
@@ -201,14 +202,88 @@ const Home: React.FC = () => {
       }
     } catch (error) {
       console.error("Payment error:", error);
-      setPaymentError(error instanceof Error ? error.message : "Failed to initialize payment");
+      const errorMessage = error instanceof Error ? error.message : 'Failed to initialize payment';
+      if (errorMessage.includes('Failed to fetch') || errorMessage.includes('ERR_BLOCKED_BY_CLIENT')) {
+        setPaymentError("服务器暂时不可用，请稍后再试。如果多次失败，请联系支持。");
+      } else {
+        setPaymentError(errorMessage);
+      }
     }
   };
 
-  const handlePricingCTA = () => {
+  const handleOpenCheckout = (planId?: string) => {
     window.Paddle.Checkout.open({
-      items: [{ priceId: 'pri_01kgrhp2wrthebpgwmn8eh5ssy', quantity: 1 }]
+      items: [{ price_id: planId || PRICE_ID, quantity: 1 }]
     });
+  };
+
+  const handleStartFullAnalysis = async () => {
+    if (!files || files.length === 0) {
+      setAnalysisError("请先选择要上传的租约文件");
+      return;
+    }
+
+    if (!userId) {
+      setAnalysisError("User ID not available. Please refresh the page.");
+      return;
+    }
+
+    setIsFullLoading(true);
+    setAnalysisError(null);
+    setAnalysisResult(null);
+
+    try {
+      const accessResponse = await fetch(API_ENDPOINTS.billingCheckAccess(userId));
+      const accessData = await accessResponse.json();
+      
+      const hasAccess = accessData.has_access === true;
+      
+      if (!hasAccess) {
+        setIsFullLoading(false);
+        handleOpenCheckout();
+        return;
+      }
+
+      const formData = new FormData();
+      files.forEach((file) => {
+        formData.append("files", file);
+      });
+      formData.append("language", lang);
+
+      const { data: result, timing } = await callApiWithTiming<any>(
+        'FullReportAnalyze',
+        `${API_ENDPOINTS.leaseAnalyze}?user_id=${userId}&language=${lang}`,
+        { method: "POST", body: formData }
+      );
+      logTiming('FullReportAnalyze', timing);
+
+      if (result.detail === "ACCESS_DENIED") {
+        handleOpenCheckout();
+        return;
+      }
+
+      if (!result.success && result.detail) {
+        setAnalysisError(result.message || "Access denied. Please try again.");
+        return;
+      }
+
+      setAnalysisResult(result);
+      setHasFullAccess(true);
+
+      if (result.success && result.data?.analysis_id) {
+        setAnalysisId(result.data.analysis_id);
+      }
+    } catch (error) {
+      console.error("Full analysis error:", error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to analyze lease';
+      if (errorMessage.includes('Failed to fetch') || errorMessage.includes('ERR_BLOCKED_BY_CLIENT')) {
+        setAnalysisError("服务器暂时不可用，请稍后再试。如果多次失败，请联系支持。");
+      } else {
+        setAnalysisError(errorMessage);
+      }
+    } finally {
+      setIsFullLoading(false);
+    }
   };
 
   return (
@@ -285,44 +360,29 @@ const Home: React.FC = () => {
       )}
 
       {/* Hero Section */}
-      <section className="relative pt-20 pb-20 lg:pt-32 lg:pb-32 bg-white">
+      <section className="relative pt-20 pb-20 lg:pt-32 lg:pb-32 bg-white no-print">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10 text-center">
           <span className="inline-block py-1 px-4 rounded-full bg-indigo-50 text-[#4F46E5] text-xs font-bold mb-8 border border-indigo-100">
             Trusted by First-Time Renters across the U.S.
           </span>
           <h1 className="text-5xl font-bold text-gray-900 mb-6">
-            AI-Powered Lease Analysis
+            {t('hero_title')}
           </h1>
-          <p className="max-w-2xl mx-auto text-xl text-gray-600 mb-8 leading-relaxed">
-            Upload your rental agreement and get 5 key clauses analyzed free — no credit card required.
+          <p className="max-w-2xl mx-auto text-xl text-gray-600 mb-4 leading-relaxed">
+            {t('hero_subtitle')}
           </p>
           
           <button 
             onClick={() => scrollToSection('analyze')}
-            className="w-full sm:w-auto px-8 py-4 bg-[#4F46E5] text-white rounded-xl font-bold text-lg hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200"
+            className="px-8 py-4 bg-[#4F46E5] text-white rounded-xl font-bold text-lg hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200"
           >
-            Try Free Preview
+            {t('hero_cta_primary')}
           </button>
-          
-          <div className="flex justify-center gap-8 mt-6 text-sm text-gray-600">
-            <span className="flex items-center gap-2">
-              <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-              No signup needed
-            </span>
-            <span className="flex items-center gap-2">
-              <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-              Results in 10 seconds
-            </span>
-            <span className="flex items-center gap-2">
-              <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-              Trusted by 500+ renters
-            </span>
-          </div>
         </div>
       </section>
 
       {/* Stats Section */}
-      <section className="py-16 bg-gradient-to-b from-indigo-50 to-white">
+      <section className="py-16 bg-gradient-to-b from-indigo-50 to-white no-print">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
             {/* Stat 1 */}
@@ -352,12 +412,84 @@ const Home: React.FC = () => {
         </div>
       </section>
 
+      {/* Features Section */}
+      <section id="features" className="py-24 bg-white no-print">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="text-center mb-16">
+            <h2 className="text-4xl font-extrabold text-slate-900 mb-4">{lang === 'zh' ? '核心功能' : 'Key Features'}</h2>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div className="bg-white rounded-2xl shadow-lg p-8 border border-slate-100">
+              <div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center mb-4">
+                <span className="text-2xl">📖</span>
+              </div>
+              <h3 className="text-xl font-bold text-slate-900 mb-3">{t('feature1_title')}</h3>
+              <p className="text-slate-600 leading-relaxed">{t('feature1_body')}</p>
+            </div>
+
+            <div className="bg-white rounded-2xl shadow-lg p-8 border border-slate-100">
+              <div className="w-12 h-12 bg-rose-100 text-rose-600 rounded-xl flex items-center justify-center mb-4">
+                <span className="text-2xl">🚨</span>
+              </div>
+              <h3 className="text-xl font-bold text-slate-900 mb-3">{t('feature2_title')}</h3>
+              <p className="text-slate-600 leading-relaxed">{t('feature2_body')}</p>
+            </div>
+
+            <div className="bg-white rounded-2xl shadow-lg p-8 border border-slate-100">
+              <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-xl flex items-center justify-center mb-4">
+                <span className="text-2xl">👨‍👩‍👧</span>
+              </div>
+              <h3 className="text-xl font-bold text-slate-900 mb-3">{t('feature3_title')}</h3>
+              <p className="text-slate-600 leading-relaxed">{t('feature3_body')}</p>
+            </div>
+
+            <div className="bg-white rounded-2xl shadow-lg p-8 border border-slate-100">
+              <div className="w-12 h-12 bg-amber-100 text-amber-600 rounded-xl flex items-center justify-center mb-4">
+                <span className="text-2xl">💳</span>
+              </div>
+              <h3 className="text-xl font-bold text-slate-900 mb-3">{t('feature4_title')}</h3>
+              <p className="text-slate-600 leading-relaxed">{t('feature4_body')}</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Steps Section */}
+      <section id="steps" className="py-24 bg-[#F8FAFC] no-print">
+        <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="text-center mb-12">
+            <h2 className="text-4xl font-extrabold text-slate-900 mb-4">{t('steps_title')}</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-white rounded-xl shadow-md p-6 flex items-start gap-4">
+              <div className="w-10 h-10 bg-indigo-600 text-white rounded-full flex items-center justify-center font-bold flex-shrink-0">1</div>
+              <p className="text-slate-700 text-lg pt-1.5">{t('step1')}</p>
+            </div>
+            <div className="bg-white rounded-xl shadow-md p-6 flex items-start gap-4">
+              <div className="w-10 h-10 bg-indigo-600 text-white rounded-full flex items-center justify-center font-bold flex-shrink-0">2</div>
+              <p className="text-slate-700 text-lg pt-1.5">{t('step2')}</p>
+            </div>
+            <div className="bg-white rounded-xl shadow-md p-6 flex items-start gap-4">
+              <div className="w-10 h-10 bg-indigo-600 text-white rounded-full flex items-center justify-center font-bold flex-shrink-0">3</div>
+              <p className="text-slate-700 text-lg pt-1.5">{t('step3')}</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* Start Your Review */}
       <section id="analyze" className="py-24 bg-[#F8FAFC]">
         <div className="max-w-4xl mx-auto px-4">
           <div className="text-center mb-12">
-            <h2 className="text-4xl font-extrabold text-slate-900 mb-4">Start Your Review</h2>
-            <p className="text-slate-500 text-lg font-medium">Upload your agreement to see how our AI audits your terms.</p>
+            <h2 className="text-4xl font-extrabold text-slate-900 mb-4">Start Full Lease Review</h2>
+            <p className="text-slate-600 text-lg font-medium mb-2">
+              Upload your lease to get a clause‑by‑clause AI review in Chinese: risk level, plain‑language explanation, and negotiation suggestions for up to 20 key clauses.
+            </p>
+            <p className="text-slate-500 text-base">
+              上传整份租约，获取逐条条款的中文风险解读：每条都有风险等级、白话解释和可直接复制给房东的谈判建议（最多 20 条关键条款）。
+            </p>
           </div>
           
           <div className="bg-white p-6 md:p-12 rounded-[2.5rem] shadow-xl shadow-slate-200/60 border border-slate-100">
@@ -369,43 +501,160 @@ const Home: React.FC = () => {
                 <div className="w-16 h-16 bg-slate-50 text-slate-300 rounded-2xl flex items-center justify-center mx-auto mb-6 group-hover:text-indigo-400 group-hover:bg-indigo-100 transition-colors">
                   <UploadCloud className="h-8 w-8" />
                 </div>
-                <p className="text-slate-500 font-semibold text-lg">
-                  {file ? file.name : "Drop your lease here (PDF or Image)"}
+                <p className="text-slate-500 font-semibold text-lg mb-2">
+                  {files.length > 0 
+                    ? `已选择：${files.length} 个文件` 
+                    : "上传租约 PDF 或多张照片"}
                 </p>
+                {files.length > 0 && (
+                  <p className="text-slate-400 text-sm">
+                    {files.map(f => f.name).join(", ")}
+                  </p>
+                )}
                 <input 
                   type="file" 
                   ref={fileInputRef} 
                   className="hidden" 
-                  accept=".pdf,image/*"
-                  onChange={(e) => setFile(e.target.files?.[0] || null)} 
+                  multiple
+                  accept=".pdf,.jpg,.jpeg,.png,image/*"
+                  onChange={(e) => setFiles(Array.from(e.target.files || []))} 
                 />
               </div>
 
-              <button
-                onClick={handleAnalyze}
-                disabled={isAnalyzing}
-                className={`w-full py-5 rounded-xl font-bold text-xl flex items-center justify-center transition-all shadow-xl ${
-                  isAnalyzing
-                    ? "bg-indigo-400 cursor-not-allowed shadow-indigo-50"
-                    : "bg-[#4F46E5] hover:bg-indigo-700 shadow-indigo-100"
-                } text-white`}
-              >
-                {isAnalyzing ? (
-                  <>
-                    <Loader2 className="mr-2 h-6 w-6 animate-spin" />
-                    Analyzing...
-                  </>
-                ) : (
-                  <>
-                    Analyze My Lease Now <ChevronDown className="ml-2 h-6 w-6" />
-                  </>
-                )}
-              </button>
-              <p className="text-center text-sm text-slate-400 font-medium">
-                {file
-                  ? `Ready to analyze: ${file.name}`
-                  : "Upload a lease PDF or image to begin analysis"}
-              </p>
+              <div className="flex flex-col gap-4">
+                <button
+                  onClick={handleStartFullAnalysis}
+                  disabled={isFullLoading || files.length === 0}
+                  className={`py-5 rounded-xl font-bold text-lg flex items-center justify-center transition-all shadow-xl ${
+                    isFullLoading || files.length === 0
+                      ? "bg-slate-300 cursor-not-allowed shadow-slate-50 text-slate-500"
+                      : "bg-[#4F46E5] hover:bg-indigo-700 shadow-indigo-100 text-white"
+                  }`}
+                >
+                  {isFullLoading ? (
+                    <>
+                      <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                      分析中，请稍候...
+                    </>
+                  ) : (
+                    <>
+                      开始完整分析
+                      <ArrowRight className="ml-2 h-5 w-5" />
+                    </>
+                  )}
+                </button>
+                <p className="text-center text-xs text-slate-400">
+                  深度分析需要 30–60 秒，请耐心等待。建议在 Wi‑Fi 环境下使用，生成过程中请不要关闭页面。
+                </p>
+              </div>
+
+              {isFullLoading && (
+                <div className="p-4 bg-indigo-50 border border-indigo-200 rounded-xl animate-pulse">
+                  <div className="flex items-center text-indigo-700">
+                    <Loader2 className="h-5 w-5 mr-3 animate-spin" />
+                    <span className="font-medium">正在生成完整报告，请耐心等待，这通常需要 30–60 秒…</span>
+                  </div>
+                </div>
+              )}
+
+              <div className="text-center space-y-2">
+                <p className="text-xs text-slate-400">
+                  支持多页 PDF 或多张租约照片，一次上传视为一份合同，我们会自动合并所有页面，一次性分析整份租约。
+                </p>
+                <p className="text-xs text-indigo-500 font-medium">
+                  本次上传将作为一份合同完整分析，不按页数额外收费。
+                </p>
+              </div>
+
+              {/* Example Report Preview */}
+              <div className="mt-8 pt-8 border-t border-slate-200">
+                <div className="text-center mb-6">
+                  <h3 className="text-xl font-bold text-slate-800 mb-1">Example report preview / 报告示例预览</h3>
+                  <p className="text-sm text-slate-500">以下是报告格式的示例，实际分析会对你的租约逐条生成类似内容</p>
+                </div>
+                
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                  {/* Card 1 - Late Fee */}
+                  <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                    <div className="flex items-start justify-between gap-2 mb-3">
+                      <h4 className="font-semibold text-slate-800 text-sm">Clause: Late Fee</h4>
+                      <span className="px-2 py-1 bg-amber-100 text-amber-700 rounded text-xs font-bold whitespace-nowrap">
+                        Medium risk
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 italic mb-3 line-clamp-2">
+                      "If rent is not received by the 5th of the month, Tenant shall pay a late fee of 5% of the monthly rent."
+                    </p>
+                    <div className="space-y-2">
+                      <div className="bg-slate-50 p-2 rounded">
+                        <p className="text-xs text-slate-700">
+                          <span className="font-semibold">中文解释：</span>这一条款规定如果你在每月 5 号之后交房租，就要额外付当月房租 5% 的滞纳金，长期下来金额不低。
+                        </p>
+                      </div>
+                      <div className="bg-indigo-50 p-2 rounded border-l-2 border-indigo-400">
+                        <p className="text-xs text-indigo-700">
+                          <span className="font-semibold">💡 建议：</span>可以和房东协商改为固定金额（例如 50 美元封顶），避免随着房租上涨而无限增加滞纳金。
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Card 2 - Cleaning Fee */}
+                  <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                    <div className="flex items-start justify-between gap-2 mb-3">
+                      <h4 className="font-semibold text-slate-800 text-sm">Clause: Cleaning Fee</h4>
+                      <span className="px-2 py-1 bg-amber-100 text-amber-700 rounded text-xs font-bold whitespace-nowrap">
+                        Medium risk
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 italic mb-3 line-clamp-2">
+                      "Tenant agrees to return the property in the same condition or pay a $200 minimum cleaning fee if professional cleaning is required."
+                    </p>
+                    <div className="space-y-2">
+                      <div className="bg-slate-50 p-2 rounded">
+                        <p className="text-xs text-slate-700">
+                          <span className="font-semibold">中文解释：</span>本条款允许房东在认定需要"专业清洁"时向你收取至少 200 美元的清洁费，标准比较模糊。
+                        </p>
+                      </div>
+                      <div className="bg-indigo-50 p-2 rounded border-l-2 border-indigo-400">
+                        <p className="text-xs text-indigo-700">
+                          <span className="font-semibold">💡 建议：</span>可以要求写明只针对超出正常磨损的严重脏污，并按实际发票或合理市场价格收费。
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Card 3 - Early Termination */}
+                  <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                    <div className="flex items-start justify-between gap-2 mb-3">
+                      <h4 className="font-semibold text-slate-800 text-sm">Clause: Early Termination</h4>
+                      <span className="px-2 py-1 bg-red-100 text-red-700 rounded text-xs font-bold whitespace-nowrap">
+                        High risk
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 italic mb-3 line-clamp-2">
+                      "If Tenant terminates the lease early, Tenant shall remain liable for all rent due until the end of the lease term, plus an additional penalty of one month's rent."
+                    </p>
+                    <div className="space-y-2">
+                      <div className="bg-slate-50 p-2 rounded">
+                        <p className="text-xs text-slate-700">
+                          <span className="font-semibold">中文解释：</span>如果你提前退租，不仅要继续承担剩余合同期内的全部房租，还要额外多付一整个月房租作为违约金，成本非常高。
+                        </p>
+                      </div>
+                      <div className="bg-indigo-50 p-2 rounded border-l-2 border-indigo-400">
+                        <p className="text-xs text-indigo-700">
+                          <span className="font-semibold">💡 建议：</span>可以尝试谈判，将责任限制为支付一定上限（例如最多 2 个月房租），或在找到新租客后停止计费。
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <p className="text-center text-sm text-slate-500 mt-4">
+                  实际报告会对你的整份租约做类似的逐条分析（最多 20 条关键条款）。<br/>
+                  <span className="text-xs text-slate-400">Your actual report will analyze up to 20 key clauses in a similar format.</span>
+                </p>
+              </div>
 
               {analysisError && (
                 <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl">
@@ -417,100 +666,375 @@ const Home: React.FC = () => {
               )}
 
               {analysisResult && analysisResult.success && (
-                <div className="mt-6 p-6 bg-indigo-50 border border-indigo-200 rounded-xl animate-in fade-in slide-in-from-top-4 duration-500">
-                  <div className="flex items-center mb-4">
+                <div ref={analysisRef} id="analysis-results" className="mt-6 p-6 bg-indigo-50 border border-indigo-200 rounded-xl animate-in fade-in slide-in-from-top-4 duration-500 print-container">
+                  
+                  {/* Print-only header */}
+                  <div className="print-only print-header">
+                    <h1>QiYoga Lease Analysis Report</h1>
+                    <p className="subtitle">For Chinese International Students</p>
+                    <p className="date">Generated: {new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
+                    <p className="disclaimer">本报告为 AI 助手生成，仅供参考，不构成法律意见。</p>
+                  </div>
+
+                  <div className="flex items-center mb-4 no-print">
                     <CheckCircle2 className="h-6 w-6 text-indigo-600 mr-2" />
                     <h3 className="text-lg font-bold text-slate-900">Analysis Complete</h3>
                   </div>
                   
-                  <div className="space-y-4">
-                    <div className="p-4 bg-white rounded-lg border border-indigo-100">
+                  <div className="space-y-6">
+                    {/* Print-only summary section */}
+                    <div className="print-only print-summary">
+                      <h2 className="print-section-title">Summary / 总结</h2>
+                      {analysisResult?.data?.risk_score && (
+                        <div style={{ marginBottom: '12px' }}>
+                          <strong>Risk Score: </strong>
+                          <span>{analysisResult.data.risk_score}/100</span>
+                          {' - '}
+                          <span className={`print-risk-badge ${
+                            analysisResult.data.risk_level === '低' ? 'print-risk-safe' :
+                            analysisResult.data.risk_level === '中' ? 'print-risk-caution' : 'print-risk-danger'
+                          }`}>
+                            {analysisResult.data.risk_level}风险
+                          </span>
+                        </div>
+                      )}
+                      <p style={{ marginTop: '12px', fontSize: '11pt' }}>
+                        本租约分析报告包含 {analysisResult?.data?.clauses?.length || 0} 个条款的详细分析。
+                        请仔细阅读每条风险提示，并在签署前与房东沟通协商不合理条款。
+                      </p>
+                    </div>
+
+                    <div className="p-4 bg-white rounded-lg border border-indigo-100 no-print">
                       <p className="text-xs font-bold text-slate-500 uppercase mb-2">Key Information</p>
                       <pre className="text-sm text-slate-700 whitespace-pre-wrap font-mono">
                         {JSON.stringify(analysisResult.data.key_info, null, 2)}
                       </pre>
                     </div>
-                    
-                    {analysisResult.data.clauses && analysisResult.data.clauses.length > 0 && (
-                      <div className="p-4 bg-white rounded-lg border border-indigo-100">
-                        <p className="text-xs font-bold text-slate-500 uppercase mb-3">
-                          Clause Analysis ({analysisResult.data.shown_clauses} of {analysisResult.data.total_clauses})
-                        </p>
-                        <div className="space-y-4">
-                          {analysisResult.data.clauses.map((clause: any) => (
-                            <div key={clause.clause_number} className="border-b border-slate-100 pb-3 last:border-0">
-                              <div className="flex items-start gap-3">
-                                <span className="flex-shrink-0 w-8 h-8 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center text-sm font-bold">
-                                  {clause.clause_number}
+
+                    {analysisResult?.data?.risk_score && (
+                      <div className="p-8 bg-gradient-to-r from-red-50 to-orange-50 rounded-2xl shadow-xl border-4 border-red-100">
+                        <div className="flex items-center justify-center gap-4">
+                          <div className="text-7xl font-black text-red-600">
+                            {analysisResult.data.risk_score}
+                          </div>
+                          <div className="text-left">
+                            <div className="text-2xl font-bold text-red-700">/ 100</div>
+                            <div className="text-xl font-semibold text-red-600 mt-1">
+                              {analysisResult.data.risk_level}风险
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {analysisResult?.data?.red_flags?.length > 0 && (
+                      <section>
+                        <h3 className="text-2xl font-black text-red-600 mb-6 flex items-center gap-3">
+                          <span>🔴</span>
+                          发现风险条款
+                          <span className="bg-red-500 text-white px-4 py-1 rounded-full text-base font-bold">
+                            {analysisResult.data.red_flags.length}个
+                          </span>
+                        </h3>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {analysisResult.data.red_flags.map((flag: any, i: number) => (
+                            <div key={flag.id || i} className="p-6 bg-gradient-to-br from-red-50 to-pink-50 border-2 border-red-200 rounded-2xl hover:shadow-xl hover:-translate-y-1 transition-all duration-300">
+                              <div className="flex items-center gap-2 mb-3">
+                                <span className={`px-2 py-1 rounded text-xs font-bold ${
+                                  flag.severity === 'high' ? 'bg-red-500 text-white' :
+                                  flag.severity === 'medium' ? 'bg-amber-500 text-white' :
+                                  'bg-slate-500 text-white'
+                                }`}>
+                                  {flag.severity === 'high' ? '高危' : flag.severity === 'medium' ? '中危' : '低危'}
                                 </span>
-                                <div className="flex-1">
-                                  <p className="text-sm text-slate-700 italic mb-2 line-clamp-2">
-                                    "{clause.clause_text}"
-                                  </p>
-                                  <div className="flex items-center gap-2 mb-2">
-                                    {clause.risk_level === "safe" && (
-                                      <span className="inline-flex items-center px-2 py-1 bg-emerald-100 text-emerald-700 text-xs font-bold rounded-full">
-                                        ✅ Safe
-                                      </span>
-                                    )}
-                                    {clause.risk_level === "caution" && (
-                                      <span className="inline-flex items-center px-2 py-1 bg-amber-100 text-amber-700 text-xs font-bold rounded-full">
-                                        ⚠️ Caution
-                                      </span>
-                                    )}
-                                    {clause.risk_level === "danger" && (
-                                      <span className="inline-flex items-center px-2 py-1 bg-rose-100 text-rose-700 text-xs font-bold rounded-full">
-                                        🚨 High Risk
-                                      </span>
-                                    )}
-                                  </div>
-                                  <p className="text-xs text-slate-600 mb-1">
-                                    <strong className="text-slate-800">Analysis:</strong> {clause.analysis}
-                                  </p>
-                                  <p className="text-xs text-slate-600">
-                                    <strong className="text-slate-800">Suggestion:</strong> {clause.suggestion}
-                                  </p>
-                                </div>
+                                <span className="text-sm font-semibold text-red-800">{flag.clause}</span>
+                              </div>
+                              <p className="text-base text-red-700 mb-4 leading-relaxed">{flag.issue}</p>
+                              <div className="bg-red-100 p-3 rounded-xl font-medium text-red-900 text-sm border-l-4 border-red-400">
+                                ⚠️ 潜在影响：{flag.impact}
                               </div>
                             </div>
                           ))}
                         </div>
+                      </section>
+                    )}
+
+                    {analysisResult?.data?.negotiation_tips?.length > 0 && (
+                      <section>
+                        <h3 className="text-2xl font-black text-green-600 mb-6 flex items-center gap-3">
+                          <span>💰</span>
+                          专业谈判策略
+                          <span className="bg-green-500 text-white px-4 py-1 rounded-full text-base font-bold">
+                            {analysisResult.data.negotiation_tips.length}条
+                          </span>
+                        </h3>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {analysisResult.data.negotiation_tips.map((tip: any, i: number) => (
+                            <div key={tip.id || i} className="group p-6 bg-gradient-to-br from-green-50 to-emerald-50 border-2 border-green-200 rounded-2xl hover:shadow-xl hover:scale-[1.02] transition-all duration-300">
+                              <div className="flex items-center gap-2 mb-3">
+                                <span className={`px-2 py-1 rounded text-xs font-bold ${
+                                  tip.priority === 'high' ? 'bg-green-600 text-white' :
+                                  tip.priority === 'medium' ? 'bg-green-500 text-white' :
+                                  'bg-green-400 text-white'
+                                }`}>
+                                  {tip.priority === 'high' ? '优先' : tip.priority === 'medium' ? '建议' : '可选'}
+                                </span>
+                                <span className="font-bold text-green-800">{tip.category}</span>
+                              </div>
+                              <p className="text-base text-green-700 mb-4 leading-relaxed">{tip.tip}</p>
+                              {tip.expected_savings && (
+                                <div className="bg-green-100 p-3 rounded-xl font-bold text-green-600 text-sm">
+                                  💵 {tip.expected_savings}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    )}
+
+                    {analysisResult?.data?.clause_summary && (
+                      <details className="group">
+                        <summary className="p-6 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-2xl font-bold text-lg text-blue-800 hover:bg-blue-100 transition-all shadow-md border-2 border-blue-100 cursor-pointer list-none flex items-center justify-between">
+                          <span className="flex items-center gap-3">
+                            <span>📋</span>
+                            合同条款深度解析 ({Object.keys(analysisResult.data.clause_summary).length}条)
+                          </span>
+                          <span className="text-sm opacity-70 group-open:hidden">点击展开</span>
+                          <span className="text-sm opacity-70 hidden group-open:inline">点击收起</span>
+                        </summary>
+                        <div className="p-6 bg-slate-50 rounded-b-2xl mt-1 space-y-3 border border-slate-200">
+                          {Object.entries(analysisResult.data.clause_summary).map(([key, clause]: [string, any]) => (
+                            <div key={key} className="p-5 bg-white rounded-xl border-l-4 border-blue-400 hover:shadow-md transition-all">
+                              <div className="flex items-center gap-3 mb-2">
+                                <span className="font-bold text-lg text-blue-800">{clause.title}</span>
+                                <span className="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-semibold">
+                                  {clause.clause_number}
+                                </span>
+                              </div>
+                              <p className="text-base text-slate-700 mb-3 leading-relaxed">{clause.summary}</p>
+                              {clause.details && (
+                                <div className="bg-blue-50 p-3 rounded-lg text-sm text-slate-600 border-l-2 border-blue-300">
+                                  <strong className="text-blue-900">详情：</strong> {clause.details}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                    
+                    {analysisResult.data.clauses && analysisResult.data.clauses.length > 0 && (
+                      <div className="p-6 bg-gradient-to-br from-slate-50 to-white rounded-2xl border border-slate-200 shadow-sm print-container">
+                        <h3 className="text-lg font-bold text-slate-700 mb-4 flex items-center gap-2 no-print">
+                          <span>📝</span>
+                          条款分析 ({analysisResult.data.shown_clauses} / {analysisResult.data.total_clauses})
+                        </h3>
+                        
+                        {/* Print-only section title */}
+                        <div className="print-only">
+                          <h2 className="print-section-title">Clause Details / 条款详情</h2>
+                        </div>
+                        
+                        <div className="space-y-6">
+                          {Array.isArray(analysisResult.data.clauses) && analysisResult.data.clauses
+                            .filter((clause: any) => {
+                              const text = clause.clause_text || clause.original_clause || clause.text || "";
+                              return text.length >= 10 && !text.startsWith("--- Page");
+                            })
+                            .map((clause: any, index: number) => {
+                            const clauseText = clause.clause_text || clause.original_clause || clause.text || "";
+                            const chineseExplanation = clause.chinese_explanation || "";
+                            const riskLevel = (clause.risk_level || "").toLowerCase();
+                            const analysisEn = clause.analysis_en || clause.analysis || "";
+                            const analysisZh = clause.analysis_zh || "";
+                            const suggestionEn = clause.suggestion_en || clause.suggestion || "";
+                            const suggestionZh = clause.suggestion_zh || "";
+                            const clauseId = clause.id || clause.clause_number || `clause-${index}`;
+
+                            const getRiskBadge = () => {
+                              if (riskLevel === "safe") {
+                                return (
+                                  <span className="inline-flex items-center px-3 py-1 bg-emerald-100 text-emerald-700 text-xs font-bold rounded-full no-print">
+                                    ✓ Safe
+                                  </span>
+                                );
+                              }
+                              if (riskLevel === "caution" || riskLevel === "medium") {
+                                return (
+                                  <span className="inline-flex items-center px-3 py-1 bg-amber-100 text-amber-700 text-xs font-bold rounded-full no-print">
+                                    ⚠ Caution
+                                  </span>
+                                );
+                              }
+                              if (riskLevel === "danger" || riskLevel === "high" || riskLevel === "high risk") {
+                                return (
+                                  <span className="inline-flex items-center px-3 py-1 bg-rose-100 text-rose-700 text-xs font-bold rounded-full no-print">
+                                    ⛔ High Risk
+                                  </span>
+                                );
+                              }
+                              return null;
+                            };
+
+                            const getPrintRiskText = () => {
+                              if (riskLevel === "safe") {
+                                return "风险等级：安全（Safe）";
+                              }
+                              if (riskLevel === "caution" || riskLevel === "medium") {
+                                return "风险等级：中等（Caution）";
+                              }
+                              if (riskLevel === "danger" || riskLevel === "high" || riskLevel === "high risk") {
+                                return "风险等级：较高（High Risk）";
+                              }
+                              return "";
+                            };
+
+                            return (
+                              <div
+                                key={clauseId}
+                                className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm hover:shadow-md transition-shadow print-clause-card print-avoid-break"
+                              >
+                                <div className="flex items-center gap-3 mb-4 pb-3 border-b border-slate-100 no-print">
+                                  <span className="inline-flex items-center justify-center w-8 h-8 bg-indigo-100 text-indigo-700 text-sm font-bold rounded-full">
+                                    {index + 1}
+                                  </span>
+                                  <span className="text-sm font-semibold text-slate-600">
+                                    Clause {index + 1} / 条款 {index + 1}
+                                  </span>
+                                  {getRiskBadge()}
+                                </div>
+                                <div className="print-only print-clause-number">
+                                  Clause {(index + 1)} / 条款 {(index + 1)}
+                                </div>
+                                
+                                <div className="print-only print-clause-text">
+                                  {clauseText}
+                                </div>
+                                
+                                <p className="text-sm font-medium text-slate-800 leading-relaxed mb-3 no-print">
+                                  {clauseText}
+                                </p>
+                                
+                                {chineseExplanation && (
+                                  <>
+                                    {/* Print-only Chinese explanation */}
+                                    <div className="print-only print-chinese-explanation">
+                                      <strong>中文解释：</strong>{chineseExplanation}
+                                    </div>
+                                    {/* Screen Chinese explanation */}
+                                    <div className="bg-amber-50 p-3 rounded-lg border-l-4 border-amber-400 mb-3 no-print">
+                                      <span className="font-semibold text-amber-800 text-sm">中文解释：</span>
+                                      <span className="text-sm text-slate-700 ml-1">{chineseExplanation}</span>
+                                    </div>
+                                  </>
+                                )}
+
+                                <div className="print-only" style={{ marginBottom: '12px' }}>
+                                  <span className={`print-risk-badge ${
+                                    riskLevel === "safe" ? "print-risk-safe" :
+                                    (riskLevel === "caution" || riskLevel === "medium") ? "print-risk-caution" : "print-risk-danger"
+                                  }`}>
+                                    {getPrintRiskText()}
+                                  </span>
+                                </div>
+
+                                {/* Analysis section */}
+                                {analysisEn && (
+                                  <>
+                                    <div className="print-only print-analysis-block">
+                                      <strong>Analysis (EN):</strong> {analysisEn}
+                                    </div>
+                                    <div className="mb-2 no-print">
+                                      <span className="text-xs font-bold text-slate-500 uppercase">Analysis: </span>
+                                      <span className="text-sm text-slate-600">{analysisEn}</span>
+                                    </div>
+                                  </>
+                                )}
+
+                                {analysisZh && (
+                                  <>
+                                    <div className="print-only print-analysis-block">
+                                      <strong>分析（中文）：</strong>{analysisZh}
+                                    </div>
+                                    <div className="mb-2 bg-blue-50 p-2 rounded border-l-2 border-blue-300 no-print">
+                                      <span className="text-xs font-bold text-blue-700">分析（中文）：</span>
+                                      <span className="text-sm text-slate-600 ml-1">{analysisZh}</span>
+                                    </div>
+                                  </>
+                                )}
+
+                                {/* Suggestion section */}
+                                {suggestionEn && (
+                                  <>
+                                    <div className="print-only print-suggestion-block">
+                                      <strong>Suggestion (EN):</strong> {suggestionEn}
+                                    </div>
+                                    <div className="mb-2 no-print">
+                                      <span className="text-xs font-bold text-slate-500 uppercase">Suggestion: </span>
+                                      <span className="text-sm text-slate-600">{suggestionEn}</span>
+                                    </div>
+                                  </>
+                                )}
+
+                                {suggestionZh && (
+                                  <>
+                                    <div className="print-only print-suggestion-block">
+                                      <strong>建议（中文）：</strong>{suggestionZh}
+                                    </div>
+                                    <div className="bg-green-50 p-2 rounded border-l-2 border-green-300 no-print">
+                                      <span className="text-xs font-bold text-green-700">建议（中文）：</span>
+                                      <span className="text-sm text-slate-600 ml-1">{suggestionZh}</span>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
                         
                         {!hasFullAccess && analysisResult.data.total_clauses > analysisResult.data.shown_clauses && (
-                          <div className="mt-4 p-4 bg-rose-50 border border-rose-200 rounded-lg">
-                            <div className="flex items-center justify-center gap-2 text-rose-700 font-medium mb-2">
+                          <div className="mt-4 p-4 bg-amber-50 border border-amber-200 rounded-lg no-print">
+                            <div className="flex items-center justify-center gap-2 text-amber-700 font-medium mb-2">
                               <span className="text-lg">🔒</span>
-                              <span>{analysisResult.data.total_clauses - analysisResult.data.shown_clauses} more clauses locked</span>
+                              <span>还有 {analysisResult.data.total_clauses - analysisResult.data.shown_clauses} 条条款未解锁</span>
                             </div>
+                            <button
+                              onClick={() => handleOpenCheckout()}
+                              className="w-full py-3 bg-[#4F46E5] text-white rounded-lg font-bold hover:bg-indigo-700 transition-all mt-2"
+                            >
+                              解锁完整报告
+                            </button>
                           </div>
                         )}
                       </div>
                     )}
                     
-                    <div className="flex justify-between text-xs text-slate-500">
-                      <span>Pages: {analysisResult.data.page_count}</span>
-                      <span>Processing Time: {analysisResult.data.processing_time}s</span>
+                    <div className="flex justify-between text-xs text-slate-500 no-print">
+                      <span>Pages: {analysisResult.data.pages || analysisResult.data.page_count}</span>
+                      <span>Processing Time: {analysisResult.data.processing_time}</span>
                     </div>
                   </div>
                   
                   {!hasFullAccess ? (
                     <button
-                      onClick={handleViewFullReport}
-                      className="mt-6 w-full py-4 bg-[#4F46E5] text-white rounded-xl font-bold hover:bg-indigo-700 transition-all"
+                      onClick={() => handleOpenCheckout()}
+                      className="mt-6 w-full py-4 bg-[#4F46E5] text-white rounded-xl font-bold hover:bg-indigo-700 transition-all no-print"
                     >
-                      Unlock Full Analysis - $9.90
-                      <div className="text-xs font-normal opacity-90 mt-1">Get 30-day unlimited access</div>
+                      解锁完整报告（20 条）- $9.90
+                      <div className="text-xs font-normal opacity-90 mt-1">获得 30 天无限访问权限</div>
                     </button>
                   ) : (
-                    <div className="mt-6 text-center">
+                    <div className="mt-6 text-center no-print">
                       <button 
-                        disabled
-                        className="w-full py-4 bg-gray-300 text-gray-500 rounded-xl font-bold hover:bg-gray-300 cursor-not-allowed transition-all"
+                        onClick={() => window.print()}
+                        className="w-full py-4 bg-[#4F46E5] text-white rounded-xl font-bold hover:bg-indigo-700 transition-all flex items-center justify-center gap-2"
                       >
-                        📄 PDF Export (Coming Soon)
+                        <Printer className="h-5 w-5" />
+                        Print / Save as PDF
                       </button>
                       <p className="text-sm text-gray-500 mt-2">
-                        We're working on this feature. For now, you can bookmark this page or screenshot your results.
+                        Click to print or save this report as a PDF file
                       </p>
                     </div>
                   )}
@@ -531,7 +1055,7 @@ const Home: React.FC = () => {
       </section>
 
       {/* How the Report Works */}
-      <section id="how-it-works" className="py-32 bg-white">
+      <section id="how-it-works" className="py-32 bg-white no-print">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center mb-20">
             <h2 className="text-4xl font-extrabold text-slate-900 mb-4">How the Report Works</h2>
@@ -594,7 +1118,7 @@ const Home: React.FC = () => {
       </section>
 
       {/* Why Choose QiYoga */}
-      <section className="py-24 bg-white">
+      <section className="py-24 bg-white no-print">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center mb-12">
             <h2 className="text-4xl font-extrabold text-slate-900 mb-4">Why Choose AI-Powered Analysis?</h2>
@@ -657,107 +1181,16 @@ const Home: React.FC = () => {
               </div>
             ))}
           </div>
-
-          {/* CTA */}
-          <div className="text-center mt-12">
-            <button
-              onClick={() => scrollToSection('analyze')}
-              className="inline-flex items-center gap-2 px-8 py-4 bg-indigo-600 text-white rounded-xl font-bold text-lg hover:bg-indigo-700 transition-all shadow-lg hover:shadow-xl"
-            >
-              Start Your Free Analysis
-              <ArrowRight className="h-5 w-5" />
-            </button>
-          </div>
-        </div>
-      </section>
-
-      {/* Demo Area */}
-      <section id="demo" className="py-24 bg-[#F8FAFC]">
-        <div className="max-w-4xl mx-auto px-4">
-          <div className="text-center mb-12">
-            <h2 className="text-4xl font-extrabold text-slate-900 mb-4">Try the AI Engine</h2>
-            <p className="text-slate-500 text-lg font-medium">Paste one short clause from your lease (max 300 characters) for a quick preview.</p>
-          </div>
-
-          <div className="bg-white p-8 rounded-[2rem] border border-slate-200 shadow-xl shadow-slate-200/40">
-            <div className="relative mb-6">
-              <textarea
-                value={quickClauseText}
-                maxLength={300}
-                onChange={(e) => setQuickClauseText(e.target.value)}
-                placeholder="Example: 'Landlord may terminate this lease with 5 days notice...'"
-                className="w-full h-40 p-6 rounded-[1.5rem] bg-white border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-slate-800 text-lg leading-relaxed resize-none transition-all placeholder:text-slate-300"
-              />
-              <div className="absolute bottom-4 right-6 text-xs font-bold text-slate-400 tabular-nums">
-                {quickClauseText.length}/300
-              </div>
-            </div>
-            <button
-              onClick={handleQuickAnalyze}
-              disabled={quickAnalyzing || !quickClauseText || quickClauseText.length > 300}
-              className={`w-full py-5 rounded-xl font-bold flex items-center justify-center transition-all text-lg ${
-                quickClauseText && !quickAnalyzing
-                ? "bg-[#4F46E5] text-white shadow-xl shadow-indigo-100"
-                : "bg-[#E2E8F0] text-[#94A3B8] cursor-not-allowed"
-              }`}
-            >
-              {quickAnalyzing ? <Loader2 className="h-6 w-6 animate-spin mr-2" /> : <Sparkles className="h-6 w-6 mr-2" />}
-              Analyze Clause
-            </button>
-
-            {quickError && (
-              <div className="mt-4 p-4 bg-rose-50 border border-rose-200 rounded-lg">
-                <div className="flex items-center text-rose-700">
-                  <AlertCircle className="h-5 w-5 mr-2" />
-                  <span className="font-medium">{quickError}</span>
-                </div>
-              </div>
-            )}
-
-            {quickResult && (
-              <div className="mt-10 p-8 bg-white rounded-[1.5rem] border border-indigo-50 animate-in fade-in slide-in-from-top-4 duration-500">
-                <div className="flex items-center justify-between mb-6">
-                  <span className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest">Analysis Result</span>
-                  <div className={`px-4 py-1.5 rounded-full text-xs font-extrabold flex items-center ${
-                    quickResult.risk_level === 'danger' ? 'bg-rose-100 text-rose-600' :
-                    quickResult.risk_level === 'caution' ? 'bg-amber-100 text-amber-600' :
-                    'bg-emerald-100 text-emerald-600'
-                  }`}>
-                    {quickResult.risk_level === 'danger' ? '🚨 High Risk' :
-                     quickResult.risk_level === 'caution' ? '⚠️ Caution' :
-                     '✅ Safe'}
-                  </div>
-                </div>
-
-                <div className="space-y-4">
-                  <div>
-                    <p className="font-semibold text-gray-900 mb-1">Analysis:</p>
-                    <p className="text-gray-700">{quickResult.analysis}</p>
-                  </div>
-                  <div>
-                    <p className="font-semibold text-gray-900 mb-1">Suggestion:</p>
-                    <p className="text-gray-700">{quickResult.suggestion}</p>
-                  </div>
-                </div>
-
-                <div className="mt-6 pt-6 border-t border-slate-200">
-                  <p className="text-sm text-gray-600 text-center">
-                    💡 Want to analyze your full lease? <button onClick={() => scrollToSection('analyze')} className="text-indigo-600 font-semibold hover:underline">Upload it above</button> for complete analysis.
-                  </p>
-                </div>
-              </div>
-            )}
-          </div>
         </div>
       </section>
 
       {/* Pricing Section */}
-      <section id="pricing" className="py-32 bg-white">
+      <section id="pricing" className="py-32 bg-white no-print">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center mb-24">
             <h2 className="text-4xl font-extrabold text-slate-900 mb-6 tracking-tight">Simple, Transparent Pricing</h2>
             <p className="max-w-2xl mx-auto text-xl text-slate-500 font-medium leading-relaxed">
-              One price. Full analysis. No hidden fees.
+              30-day pass. Full analysis. No hidden fees.
             </p>
           </div>
 
@@ -768,15 +1201,19 @@ const Home: React.FC = () => {
                   Best Value
                 </span>
               </div>
-              
+
               <h3 className="text-2xl font-bold text-gray-900 mb-2">
-                30-Day Full Access
+                30-Day Moving Pack
               </h3>
-              
+
               <div className="mb-4">
                 <span className="text-5xl font-bold text-indigo-600">$9.90</span>
                 <span className="text-gray-600 ml-2">one-time payment</span>
               </div>
+
+              <p className="text-center text-gray-700 font-medium mb-4">
+                Up to 5 full lease reviews in 30 days.
+              </p>
 
               <div className="bg-indigo-50 rounded-lg p-4 mb-6">
                 <p className="text-sm font-semibold text-gray-700 mb-2">💰 Compare to alternatives:</p>
@@ -790,19 +1227,19 @@ const Home: React.FC = () => {
               <ul className="space-y-4 mb-6">
                 <li className="flex items-start">
                   <CheckCircle2 className="w-6 h-6 text-green-500 mr-3 flex-shrink-0" />
-                  <span className="text-gray-700">Analyze 3-5 leases in 30 days</span>
+                  <span className="text-gray-700">Analyze up to 5 leases within 30 days</span>
                 </li>
                 <li className="flex items-start">
                   <CheckCircle2 className="w-6 h-6 text-green-500 mr-3 flex-shrink-0" />
-                  <span className="text-gray-700">Complete clause-by-clause breakdown</span>
+                  <span className="text-gray-700">Full AI review of every clause</span>
                 </li>
                 <li className="flex items-start">
                   <CheckCircle2 className="w-6 h-6 text-green-500 mr-3 flex-shrink-0" />
-                  <span className="text-gray-700">Risk scoring & red flag alerts</span>
+                  <span className="text-gray-700">Overall risk score + red‑flag list</span>
                 </li>
                 <li className="flex items-start">
                   <CheckCircle2 className="w-6 h-6 text-green-500 mr-3 flex-shrink-0" />
-                  <span className="text-gray-700">Negotiation tips for every issue</span>
+                  <span className="text-gray-700">Negotiation questions to ask your landlord</span>
                 </li>
               </ul>
 
@@ -818,19 +1255,12 @@ const Home: React.FC = () => {
                 >
                   You Have Full Access ✓
                 </button>
-              ) : !analysisId ? (
-                <button
-                  onClick={handlePricingCTA}
-                  className="w-full py-4 bg-indigo-100 text-indigo-600 rounded-xl font-bold text-lg hover:bg-indigo-200 transition-all"
-                >
-                  Get Started
-                </button>
               ) : (
                 <button
-                  onClick={handlePricingCTA}
+                  onClick={() => handleOpenCheckout()}
                   className="w-full py-4 bg-indigo-600 text-white rounded-xl font-bold text-lg hover:bg-indigo-700 transition-all shadow-lg hover:shadow-xl"
                 >
-                  Unlock Full Access - $9.90
+                  Get started – Unlock full lease reports
                 </button>
               )}
             </div>
@@ -839,7 +1269,7 @@ const Home: React.FC = () => {
       </section>
 
       {/* FAQ Section */}
-      <section className="py-24 bg-gray-50">
+      <section className="py-24 bg-gray-50 no-print">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center mb-12">
             <h2 className="text-4xl font-extrabold text-slate-900 mb-4">Frequently Asked Questions</h2>
@@ -919,29 +1349,47 @@ const Home: React.FC = () => {
               </div>
             </div>
 
-            {/* Q5 */}
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-              <button
-                onClick={() => toggleFaq(5)}
-                className="w-full px-6 py-5 flex items-center justify-between text-left hover:bg-gray-50 transition-all"
-              >
-                <span className="font-semibold text-slate-900 text-lg">Do you share my data with landlords or brokers?</span>
-                {openFaq === 5 ? <ChevronUp className="h-5 w-5 text-slate-500 flex-shrink-0" /> : <ChevronDown className="h-5 w-5 text-slate-500 flex-shrink-0" />}
-              </button>
-              <div className={`overflow-hidden transition-all duration-300 ease-in-out ${openFaq === 5 ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'}`}>
-                <div className="px-6 pb-6">
-                  <p className="text-slate-600 leading-relaxed">
-                    Never. Your lease analysis is 100% confidential. We don't sell, share, or monetize your data. We're on YOUR side as a tenant, not the landlord's.
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
+             {/* Q5 */}
+             <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+               <button
+                 onClick={() => toggleFaq(5)}
+                 className="w-full px-6 py-5 flex items-center justify-between text-left hover:bg-gray-50 transition-all"
+               >
+                 <span className="font-semibold text-slate-900 text-lg">Do you share my data with landlords or brokers?</span>
+                 {openFaq === 5 ? <ChevronUp className="h-5 w-5 text-slate-500 flex-shrink-0" /> : <ChevronDown className="h-5 w-5 text-slate-500 flex-shrink-0" />}
+               </button>
+               <div className={`overflow-hidden transition-all duration-300 ease-in-out ${openFaq === 5 ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'}`}>
+                 <div className="px-6 pb-6">
+                   <p className="text-slate-600 leading-relaxed">
+                     Never. Your lease analysis is 100% confidential. We don't sell, share, or monetize your data. We're on YOUR side as a tenant, not the landlord's.
+                   </p>
+                 </div>
+               </div>
+             </div>
+
+             {/* Q6 */}
+             <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+               <button
+                 onClick={() => toggleFaq(6)}
+                 className="w-full px-6 py-5 flex items-center justify-between text-left hover:bg-gray-50 transition-all"
+               >
+                 <span className="font-semibold text-slate-900 text-lg">How long does my $9.90 plan stay active?</span>
+                 {openFaq === 6 ? <ChevronUp className="h-5 w-5 text-slate-500 flex-shrink-0" /> : <ChevronDown className="h-5 w-5 text-slate-500 flex-shrink-0" />}
+               </button>
+               <div className={`overflow-hidden transition-all duration-300 ease-in-out ${openFaq === 6 ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'}`}>
+                 <div className="px-6 pb-6">
+                   <p className="text-slate-600 leading-relaxed">
+                     Your access is valid for 30 days from the date of purchase. During that time, you can upload and analyze up to 5 leases. After 30 days, your access expires, and you can purchase another 30‑day pack if you need more reviews.
+                   </p>
+                 </div>
+               </div>
+             </div>
+           </div>
         </div>
       </section>
 
       {/* Customer Reviews */}
-      <section className="py-24 bg-white">
+      <section className="py-24 bg-white no-print">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center mb-16">
             <h2 className="text-4xl font-extrabold text-slate-900 mb-4">What Renters Say About Us</h2>
@@ -1016,7 +1464,7 @@ const Home: React.FC = () => {
       </section>
 
       {/* Need Assistance */}
-      <section id="contact" className="py-32 bg-[#F8FAFC]">
+      <section id="contact" className="py-32 bg-[#F8FAFC] no-print">
         <div className="max-w-4xl mx-auto px-4">
           <div className="bg-white p-16 rounded-[3rem] border border-slate-100 text-center shadow-xl shadow-slate-200/50">
             <h2 className="text-3xl font-extrabold text-slate-900 mb-6">Need Assistance?</h2>
