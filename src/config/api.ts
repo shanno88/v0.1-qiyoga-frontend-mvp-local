@@ -1,14 +1,14 @@
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+export const API_BASE_URL = 'http://localhost:3001';
 
 export const API_ENDPOINTS = {
   checkout: `${API_BASE_URL}/api/checkout`,
   webhookPaddle: `${API_BASE_URL}/webhook/paddle`,
-  ocr: `${API_BASE_URL}/api/ocr`,
+  ocr: (userId: string) => `${API_BASE_URL}/api/lease/ocr?user_id=${userId}`,
   billingCheckAccess: (userId: string) => `${API_BASE_URL}/api/billing/check-access?user_id=${userId}`,
   billingCheckoutCreate: `${API_BASE_URL}/api/billing/checkout/create`,
   billingOrders: (userId: string) => `${API_BASE_URL}/api/billing/orders/${userId}`,
   billingTransaction: (transactionId: string) => `${API_BASE_URL}/api/billing/transaction/${transactionId}`,
-  leaseAnalyze: `${API_BASE_URL}/api/lease/analyze`,
+  leaseAnalyze: (userId: string) => `${API_BASE_URL}/api/lease/analyze?user_id=${userId}`,
   quickClauseAnalyze: `${API_BASE_URL}/api/lease/clause/quick-analyze`,
   quickClauseHistory: `${API_BASE_URL}/api/lease/clause/quick-analyze/history`,
   analyzeClauses: `${API_BASE_URL}/api/analyze-clauses`

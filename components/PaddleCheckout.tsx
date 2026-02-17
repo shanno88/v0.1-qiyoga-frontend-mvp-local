@@ -321,7 +321,7 @@ export const AccessStatus: React.FC<{
     const checkAccess = async () => {
       try {
         const response = await fetch(API_ENDPOINTS.billingCheckAccess(userId));
-        
+
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
@@ -399,7 +399,7 @@ export const useAccessStatus = (userId: string) => {
     const checkAccess = async () => {
       try {
         const response = await fetch(API_ENDPOINTS.billingCheckAccess(userId));
-        
+
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
@@ -445,7 +445,7 @@ export const pollTransactionStatus = async (
 
       try {
         const response = await fetch(API_ENDPOINTS.billingTransaction(transactionId));
-        
+
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }

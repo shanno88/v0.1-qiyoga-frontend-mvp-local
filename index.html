@@ -6,7 +6,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>QiYoga Studio - Simple AI Tools</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.paddle.com/paddle/v2/paddle.js"></script>
+    <script>
+      var paddleScript = document.createElement('script');
+      paddleScript.src = 'https://cdn.paddle.com/paddle/v2/paddle.js';
+      paddleScript.async = true;
+      document.head.appendChild(paddleScript);
+    </script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         body {

@@ -43,7 +43,7 @@ const BillingSuccess: React.FC = () => {
       try {
         // Poll for a moment to ensure webhook has been processed
         await new Promise(resolve => setTimeout(resolve, 2000));
-        
+
         const response = await fetch(API_ENDPOINTS.billingCheckAccess(userId));
         const data: AccessStatus = await response.json();
 
@@ -174,7 +174,7 @@ const BillingSuccess: React.FC = () => {
               <Calendar className="h-5 w-5 text-indigo-600 mt-0.5 flex-shrink-0" />
               <div>
                 <p className="font-semibold text-slate-900">Full Clause Breakdown</p>
-                <p className="text-sm text-slate-600">See all 15-20 clauses analyzed</p>
+                <p className="text-sm text-slate-600">AI highlights key clauses from your entire lease</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
